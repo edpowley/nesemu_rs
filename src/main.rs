@@ -120,9 +120,9 @@ impl MyGame {
 impl EventHandler<ggez::GameError> for MyGame {
     fn update(&mut self, _ctx: &mut Context) -> GameResult<()> {
         self.emu_state.run_to_next_nmi();
-        println!("{} {}", self.emu_state.ppu_x, self.emu_state.ppu_y);
+        //println!("{} {}", self.emu_state.ppu_x, self.emu_state.ppu_y);
 
-        self.frame_image = Image::from_rgba8(_ctx, 256, 240, &*self.emu_state.frame_buffer)?;
+        self.frame_image = Image::from_rgba8(_ctx, 256, 240, &self.emu_state.frame_buffer)?;
         self.frame_image.set_filter(FilterMode::Nearest);
 
         Ok(())

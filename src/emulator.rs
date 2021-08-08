@@ -7,6 +7,73 @@ use crate::opcodes::AddressMode;
 
 //--------------------------------------------------------------------------------
 
+const c_palette: [[u8; 4]; 64] = [
+    [ 84,  84,  84, 255],  
+    [  0,  30, 116, 255],  
+    [  8,  16, 144, 255],  
+    [ 48,   0, 136, 255],  
+    [ 68,   0, 100, 255],  
+    [ 92,   0,  48, 255],  
+    [ 84,   4,   0, 255],  
+    [ 60,  24,   0, 255],  
+    [ 32,  42,   0, 255],  
+    [  8,  58,   0, 255],  
+    [  0,  64,   0, 255],  
+    [  0,  60,   0, 255],  
+    [  0,  50,  60, 255],  
+    [  0,   0,   0, 255],  
+    [  0,   0,   0, 255],  
+    [  0,   0,   0, 255],
+    [152, 150, 152, 255],  
+    [  8,  76, 196, 255],  
+    [ 48,  50, 236, 255],  
+    [ 92,  30, 228, 255],  
+    [136,  20, 176, 255],  
+    [160,  20, 100, 255],  
+    [152,  34,  32, 255],  
+    [120,  60,   0, 255],  
+    [ 84,  90,   0, 255],  
+    [ 40, 114,   0, 255],  
+    [  8, 124,   0, 255],  
+    [  0, 118,  40, 255],  
+    [  0, 102, 120, 255],  
+    [  0,   0,   0, 255],  
+    [  0,   0,   0, 255],  
+    [  0,   0,   0, 255],
+    [236, 238, 236, 255],  
+    [ 76, 154, 236, 255],  
+    [120, 124, 236, 255],  
+    [176,  98, 236, 255],  
+    [228,  84, 236, 255],  
+    [236,  88, 180, 255],  
+    [236, 106, 100, 255],  
+    [212, 136,  32, 255],  
+    [160, 170,   0, 255],  
+    [116, 196,   0, 255],  
+    [ 76, 208,  32, 255],  
+    [ 56, 204, 108, 255],  
+    [ 56, 180, 204, 255],  
+    [ 60,  60,  60, 255],  
+    [  0,   0,   0, 255],  
+    [  0,   0,   0, 255],
+    [236, 238, 236, 255],  
+    [168, 204, 236, 255],  
+    [188, 188, 236, 255],  
+    [212, 178, 236, 255],  
+    [236, 174, 236, 255],  
+    [236, 174, 212, 255],  
+    [236, 180, 176, 255],  
+    [228, 196, 144, 255],  
+    [204, 210, 120, 255],  
+    [180, 222, 120, 255],  
+    [168, 226, 144, 255],  
+    [152, 226, 180, 255],  
+    [160, 214, 228, 255],  
+    [160, 162, 160, 255],  
+    [  0,   0,   0, 255],  
+    [  0,   0,   0, 255],
+];
+
 pub enum NametableMirrorMode {
     Horizontal, Vertical
 }
@@ -84,7 +151,7 @@ pub struct EmuState {
     ppu_scroll_latch: bool,
     ppu_nmi_flag: bool,
 
-    pub frame_buffer: Box<[u8; 256*240*4]>
+    pub frame_buffer: Vec<u8>
 }
 
 impl EmuState {
@@ -115,9 +182,10 @@ impl EmuState {
             ppu_scroll_y: 0,
             ppu_scroll_latch: false,
             ppu_nmi_flag: false,
-            frame_buffer: Box::new([0; 256*240*4])
+            frame_buffer: Vec::new()
         };
         result.cpu_flags.interrupt_disable = true;
+        result.frame_buffer.resize(256 * 240 * 4, 0);
         return result;
     }
 
@@ -779,8 +847,8 @@ impl EmuState {
                 let nametable_index = ((address & 0x0C00) >> 10) as usize;
                 assert!(nametable_index < 4);
                 let mirrored_index = match self.rom_state.nametable_mirror_mode {
-                    NametableMirrorMode::Horizontal => nametable_index / 2,
-                    NametableMirrorMode::Vertical => nametable_index % 2
+                    NametableMirrorMode::Horizontal => nametable_index % 2,
+                    NametableMirrorMode::Vertical => nametable_index / 2
                 };
                 self.ppu_nametable_ram[mirrored_index][(address & 0x03FF) as usize]
             }
@@ -789,7 +857,10 @@ impl EmuState {
             0x3000 ..= 0x3EFF => self.read_ppu_byte(address - 0x1000),
 
             // Palette
-            0x3F00 ..= 0x3F1F => self.ppu_palette_ram[(address - 0x3F00) as usize],
+            0x3F00 ..= 0x3F1F => match address { 
+                0x3F10 | 0x3F14 | 0x3F18 | 0x3F1C => self.ppu_palette_ram[(address - 0x3F10) as usize],
+                _ => self.ppu_palette_ram[(address - 0x3F00) as usize]
+            }
 
             // Wrapping
             0x3F20 ..= 0x3FFF => self.read_ppu_byte(address & 0x3F1F),
@@ -806,8 +877,8 @@ impl EmuState {
                 let nametable_index = ((address & 0x0C00) >> 10) as usize;
                 assert!(nametable_index < 4);
                 let mirrored_index = match self.rom_state.nametable_mirror_mode {
-                    NametableMirrorMode::Horizontal => nametable_index / 2,
-                    NametableMirrorMode::Vertical => nametable_index % 2
+                    NametableMirrorMode::Horizontal => nametable_index % 2,
+                    NametableMirrorMode::Vertical => nametable_index / 2
                 };
                 self.ppu_nametable_ram[mirrored_index][(address & 0x03FF) as usize] = value;
             }
@@ -816,7 +887,10 @@ impl EmuState {
             0x3000 ..= 0x3EFF => self.write_ppu_byte(address - 0x1000, value),
 
             // Palette
-            0x3F00 ..= 0x3F1F => self.ppu_palette_ram[(address - 0x3F00) as usize] = value,
+            0x3F00 ..= 0x3F1F => match address { 
+                    0x3F10 | 0x3F14 | 0x3F18 | 0x3F1C => self.ppu_palette_ram[(address - 0x3F10) as usize] = value,
+                    _ => self.ppu_palette_ram[(address - 0x3F00) as usize] = value
+                }
 
             // Wrapping
             0x3F20 ..= 0x3FFF => self.write_ppu_byte(address & 0x3F1F, value),
@@ -833,28 +907,95 @@ impl EmuState {
         for _ in 0 .. n_cycles {
 
             // Cycle skipping on odd frames
-            if self.ppu_y == -1 && self.ppu_x == 0 && self.ppu_odd_frame && (self.ppu_mask & 0x18) != 0 {
-                self.ppu_x += 1;
+            if self.ppu_y == -1 && self.ppu_x == 0 {
+                if self.ppu_odd_frame && (self.ppu_mask & 0x18) != 0 {
+                    self.ppu_x += 1;
+                }
+                self.ppu_odd_frame = !self.ppu_odd_frame;
             }
 
-            // Drawing
-            if self.ppu_y >= 0 && self.ppu_y < 240 && self.ppu_x >= 1 && self.ppu_x < 257 {
-                let index = ((self.ppu_y * 256 + self.ppu_x - 1) * 4) as usize;
-                self.frame_buffer[index + 0] = (self.ppu_x - 1) as u8;
-                self.frame_buffer[index + 1] = self.ppu_y as u8;
-                self.frame_buffer[index + 2] = 128;
-                self.frame_buffer[index + 3] = 255;
-            }
-    
-            // VBlank flag
-            if self.ppu_y == 241 && self.ppu_x == 1
-            {
-                self.ppu_status |= 0x80;
-                if self.ppu_ctrl & 0x80 != 0 {
-                    self.ppu_nmi_flag = true;
+            match (self.ppu_x, self.ppu_y) {
+                // Pre-render
+                (1, -1) => {
+                    // Clear sprite 0 hit
+                    self.ppu_status &= !0x40;
                 }
+
+                // Drawing
+                (1 ..= 256, 0 ..= 239) => {
+                    if self.ppu_y == 20 {
+                        self.ppu_status |= 0x40; // zero hit
+                    }
+                    let mut pixel = [0, 0, 0, 255u8];
+
+                    // Background drawing
+                    if self.ppu_mask & 0x08 != 0 {
+                        let mut nametable_base = (self.ppu_ctrl & 3) as u16 * 0x400 + 0x2000;
+                        assert!(nametable_base == 0x2000 || nametable_base == 0x2400 || nametable_base == 0x2800 || nametable_base == 0x2C00);
+
+                        // Position in nametable in pixels
+                        let nt_x = (self.ppu_scroll_x as i32) + self.ppu_x - 1;
+                        let nt_y = (self.ppu_scroll_y as i32) + self.ppu_y;
+
+                        // Nametable tile coordinates
+                        let mut tile_x = nt_x / 8;
+                        if tile_x >= 32 {
+                            tile_x -= 32;
+                            nametable_base ^= 0x400;
+                        }
+                        let mut tile_y = nt_y / 8;
+                        if tile_y >= 32 {
+                            tile_y -= 32;
+                            nametable_base ^= 0x800;
+                        }
+
+                        // Get nametable data
+                        let nt_entry = self.read_ppu_byte(nametable_base + (tile_y * 32 + tile_x) as u16);
+                        let attr_index = (tile_y / 4) * 8 + (tile_x / 4);
+                        let attribute_byte = self.read_ppu_byte(nametable_base + 0x3C0 + attr_index as u16);
+                        let attribute_idx = (tile_y % 4) / 2 * 2 + (tile_x % 4) / 2;
+                        assert!(attribute_idx >= 0 && attribute_idx < 4);
+                        let attribute = (attribute_byte >> (attribute_idx * 2)) & 3;
+
+                        // Get pattern table data
+                        let pattern_table_base = ((self.ppu_ctrl & 0x10) as u16) << 8;
+                        assert!(pattern_table_base == 0x0000 || pattern_table_base == 0x1000);
+                        let plane_0_address = pattern_table_base + ((nt_entry as u16) << 4) + (nt_y % 8) as u16;
+                        let plane_0_row = self.read_ppu_byte(plane_0_address);
+                        let plane_1_row = self.read_ppu_byte(plane_0_address + 8);
+                        let px = nt_x % 8;
+                        let bit_0 = (plane_0_row >> (7-px)) & 1;
+                        let bit_1 = (plane_1_row >> (7-px)) & 1;
+                        let palette_index = bit_0 | (bit_1 << 1);
+
+                        // Get palette colour
+                        let colour_index = if palette_index > 0 {
+                            self.read_ppu_byte(0x3F00 + (attribute as u16) * 4 + (palette_index as u16))
+                        } else {
+                            self.read_ppu_byte(0x3F00)
+                        };
+                        pixel = c_palette[colour_index as usize];
+                    }
+
+                    let index = ((self.ppu_y * 256 + self.ppu_x - 1) * 4) as usize;
+                    self.frame_buffer[index .. index+4].copy_from_slice(&pixel);
+                    /*self.frame_buffer[index + 1] = self.ppu_y as u8;
+                    self.frame_buffer[index + 2] = 128;
+                    self.frame_buffer[index + 3] = 255;*/
+                }
+
+                // VBlank flag
+                (1, 241) => {
+                    self.ppu_status |= 0x80;
+                    if self.ppu_ctrl & 0x80 != 0 {
+                        self.ppu_nmi_flag = true;
+                    }
+                }
+
+                // All others
+                _ => {}
             }
-    
+
             // TODO more logic
             
             // Advance
