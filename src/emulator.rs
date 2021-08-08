@@ -56,8 +56,8 @@ pub struct CpuFlags {
     negative : bool,
 }
 
-pub struct EmuState<'a> {
-    pub rom_state : &'a RomState,
+pub struct EmuState {
+    pub rom_state : RomState,
     ram : [u8; 2048],
     cycle_count : u64,
     last_ppu_cycle : u64,
@@ -82,13 +82,15 @@ pub struct EmuState<'a> {
     ppu_scroll_x: u8,
     ppu_scroll_y: u8,
     ppu_scroll_latch: bool,
-    ppu_nmi_flag: bool
+    ppu_nmi_flag: bool,
+
+    pub frame_buffer: Box<[u8; 256*240*4]>
 }
 
-impl EmuState<'_> {
-    pub fn new(rom_state: &RomState) -> EmuState {
+impl EmuState {
+    pub fn new(rom_path: &Path) -> EmuState {
         let mut result = EmuState {
-            rom_state,
+            rom_state: RomState::load(rom_path),
             ram: [0; 2048],
             cycle_count: 0,
             last_ppu_cycle: 0,
@@ -113,6 +115,7 @@ impl EmuState<'_> {
             ppu_scroll_y: 0,
             ppu_scroll_latch: false,
             ppu_nmi_flag: false,
+            frame_buffer: Box::new([0; 256*240*4])
         };
         result.cpu_flags.interrupt_disable = true;
         return result;
@@ -438,7 +441,7 @@ impl EmuState<'_> {
     }
 
     pub fn run_one_instruction(&mut self) {
-        let debug_print = true;
+        let debug_print = false;
 
         let instruction = self.read_next_program_byte();
         let opcode = opcodes::decode(instruction);
@@ -830,8 +833,17 @@ impl EmuState<'_> {
         for _ in 0 .. n_cycles {
 
             // Cycle skipping on odd frames
-            if self.ppu_y == -1 && self.ppu_y == 0 && self.ppu_odd_frame && (self.ppu_mask & 0x18) != 0 {
+            if self.ppu_y == -1 && self.ppu_x == 0 && self.ppu_odd_frame && (self.ppu_mask & 0x18) != 0 {
                 self.ppu_x += 1;
+            }
+
+            // Drawing
+            if self.ppu_y >= 0 && self.ppu_y < 240 && self.ppu_x >= 1 && self.ppu_x < 257 {
+                let index = ((self.ppu_y * 256 + self.ppu_x - 1) * 4) as usize;
+                self.frame_buffer[index + 0] = (self.ppu_x - 1) as u8;
+                self.frame_buffer[index + 1] = self.ppu_y as u8;
+                self.frame_buffer[index + 2] = 128;
+                self.frame_buffer[index + 3] = 255;
             }
     
             // VBlank flag
