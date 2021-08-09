@@ -6,6 +6,7 @@ use ggez::{Context, ContextBuilder, GameResult};
 use ggez::graphics::{self, Color, Image, DrawParam, FilterMode};
 use ggez::event::{self, EventHandler};
 use ggez::conf::{WindowMode, WindowSetup};
+use ggez::timer;
 
 use ggez::mint::Point2;
 
@@ -102,7 +103,8 @@ fn main() {
 
 struct MyGame {
     emu_state: emulator::EmuState,
-    frame_image: Image
+    frame_image: Image,
+    frame_count: u64
 }
 
 impl MyGame {
@@ -111,7 +113,8 @@ impl MyGame {
 
         return MyGame {
             emu_state: emulator::EmuState::new(rom_path),
-            frame_image: Image::solid(ctx, 256, Color::BLACK).expect("Failed to create image")
+            frame_image: Image::solid(ctx, 256, Color::BLACK).expect("Failed to create image"),
+            frame_count: 0
         };
     }
 
@@ -125,6 +128,11 @@ impl EventHandler<ggez::GameError> for MyGame {
         self.frame_image = Image::from_rgba8(_ctx, 256, 240, &self.emu_state.frame_buffer)?;
         self.frame_image.set_filter(FilterMode::Nearest);
 
+        self.frame_count += 1;
+        if self.frame_count % 60 == 0 {
+            println!("{} fps", timer::fps(_ctx));
+        }
+        
         Ok(())
     }
 

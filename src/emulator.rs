@@ -123,6 +123,14 @@ pub struct CpuFlags {
     negative : bool,
 }
 
+struct SpriteData {
+    index: usize,
+    y: u8,
+    tile: u8,
+    attributes: u8,
+    x: u8
+}
+
 pub struct EmuState {
     pub rom_state : RomState,
     ram : [u8; 2048],
@@ -151,7 +159,8 @@ pub struct EmuState {
     ppu_scroll_latch: bool,
     ppu_nmi_flag: bool,
 
-    pub frame_buffer: Vec<u8>
+    pub frame_buffer: Vec<u8>,
+    sprites_this_scanline: Vec<SpriteData>
 }
 
 impl EmuState {
@@ -182,7 +191,8 @@ impl EmuState {
             ppu_scroll_y: 0,
             ppu_scroll_latch: false,
             ppu_nmi_flag: false,
-            frame_buffer: Vec::new()
+            frame_buffer: Vec::new(),
+            sprites_this_scanline: Vec::new()
         };
         result.cpu_flags.interrupt_disable = true;
         result.frame_buffer.resize(256 * 240 * 4, 0);
@@ -900,6 +910,15 @@ impl EmuState {
         }
     }
 
+    fn get_pixel_from_pattern_table(&self, pt_base: u16, tile_index: u8, x: u8, y: u8) -> u8 {
+        let plane_0_address = pt_base + ((tile_index as u16) << 4) + y as u16;
+        let plane_0_row = self.read_ppu_byte(plane_0_address);
+        let plane_1_row = self.read_ppu_byte(plane_0_address + 8);
+        let bit_0 = (plane_0_row >> (7-x)) & 1;
+        let bit_1 = (plane_1_row >> (7-x)) & 1;
+        return bit_0 | (bit_1 << 1);
+    }
+
     fn update_ppu(&mut self) {
         let n_cycles = (self.cycle_count - self.last_ppu_cycle) * 3;
         self.last_ppu_cycle = self.cycle_count;
@@ -919,14 +938,39 @@ impl EmuState {
                 (1, -1) => {
                     // Clear sprite 0 hit
                     self.ppu_status &= !0x40;
+
+                    // Reset nametable index
+                    // This is probably not the right way to do things but 🤷‍♂️
+                    self.ppu_ctrl &= !0x03;
+                }
+
+                // Sprite scanning
+                (0, 0 ..= 239) => {
+                    self.sprites_this_scanline.clear();
+
+                    'check_sprites: for i in 0..64 {
+                        let sprite_y = (self.ppu_oam_ram[i * 4] as i32) + 1;
+                        if self.ppu_y >= sprite_y && self.ppu_y < sprite_y + 8 {
+                            self.sprites_this_scanline.push(SpriteData {
+                                index: i,
+                                y: self.ppu_oam_ram[i * 4],
+                                tile: self.ppu_oam_ram[i * 4 + 1],
+                                attributes: self.ppu_oam_ram[i * 4 + 2],
+                                x: self.ppu_oam_ram[i * 4 + 3],
+                            });
+
+                            if self.sprites_this_scanline.len() >= 8 {
+                                break 'check_sprites;
+                            }
+                        }
+                    }
                 }
 
                 // Drawing
                 (1 ..= 256, 0 ..= 239) => {
-                    if self.ppu_y == 20 {
-                        self.ppu_status |= 0x40; // zero hit
-                    }
-                    let mut pixel = [0, 0, 0, 255u8];
+                    let mut bg_pixel = 0u8;
+                    let mut sprite_pixel = 0u8;
+                    let mut sprite_in_front = true;
 
                     // Background drawing
                     if self.ppu_mask & 0x08 != 0 {
@@ -960,28 +1004,78 @@ impl EmuState {
                         // Get pattern table data
                         let pattern_table_base = ((self.ppu_ctrl & 0x10) as u16) << 8;
                         assert!(pattern_table_base == 0x0000 || pattern_table_base == 0x1000);
-                        let plane_0_address = pattern_table_base + ((nt_entry as u16) << 4) + (nt_y % 8) as u16;
-                        let plane_0_row = self.read_ppu_byte(plane_0_address);
-                        let plane_1_row = self.read_ppu_byte(plane_0_address + 8);
-                        let px = nt_x % 8;
-                        let bit_0 = (plane_0_row >> (7-px)) & 1;
-                        let bit_1 = (plane_1_row >> (7-px)) & 1;
-                        let palette_index = bit_0 | (bit_1 << 1);
+                        let palette_index = self.get_pixel_from_pattern_table(pattern_table_base, nt_entry, (nt_x % 8) as u8, (nt_y % 8) as u8);
+
+                        if palette_index == 0 {
+                            bg_pixel = 0;
+                        } else {
+                            bg_pixel = palette_index + attribute * 4;
+                        }
 
                         // Get palette colour
-                        let colour_index = if palette_index > 0 {
+                        /*let colour_index = if palette_index > 0 {
                             self.read_ppu_byte(0x3F00 + (attribute as u16) * 4 + (palette_index as u16))
                         } else {
                             self.read_ppu_byte(0x3F00)
                         };
-                        pixel = c_palette[colour_index as usize];
+                        pixel = c_palette[colour_index as usize];*/
                     }
 
+                    // Sprite drawing
+                    if self.ppu_mask & 0x10 != 0 {
+                        'sprite_loop: for sprite in &self.sprites_this_scanline {
+                            let sprite_x = sprite.x as i32;
+                            if self.ppu_x-1 >= sprite_x && self.ppu_x-1 < sprite_x + 8 {
+                                let pattern_table_base = ((self.ppu_ctrl & 0x08) as u16) << 8;
+                                assert!(pattern_table_base == 0x0000 || pattern_table_base == 0x1000);
+
+                                let mut px = self.ppu_x - 1 - sprite_x;
+                                if sprite.attributes & 0x40 != 0 {
+                                    px = 7 - px;
+                                }
+
+                                let mut py = self.ppu_y - 1 - sprite.y as i32;
+                                if sprite.attributes & 0x80 != 0 {
+                                    py = 7 - py;
+                                }
+
+                                let palette_index = self.get_pixel_from_pattern_table(pattern_table_base, sprite.tile, px as u8, py as u8);
+
+                                if palette_index == 0 {
+                                    sprite_pixel = 0;
+                                } else {
+                                    let palette = 4 + (sprite.attributes & 3);
+                                    sprite_pixel = palette_index + palette * 4;
+                                }
+
+                                if sprite_pixel != 0 {
+                                    if sprite.index == 0 && bg_pixel != 0 {
+                                        self.ppu_status |= 0x40; // zero hit
+                                    }
+
+                                    sprite_in_front = sprite.attributes & 0x20 == 0;
+
+                                    break 'sprite_loop; // stop after the first non-transparent sprite is found
+                                }
+                            }
+                        }
+                    }
+
+                    // Pixel priority
+                    let palette_index = match (bg_pixel, sprite_pixel, sprite_in_front) {
+                        (_, 0, true) => bg_pixel,
+                        (_, _, true) => sprite_pixel,
+                        (0, _, false) => sprite_pixel,
+                        (_, _, false) => bg_pixel
+                    };
+
+                    // Get palette colour
+                    let colour_index = self.ppu_palette_ram[palette_index as usize];
+                    let pixel = c_palette[colour_index as usize];
+
+                    // Set the pixel in the frame buffer
                     let index = ((self.ppu_y * 256 + self.ppu_x - 1) * 4) as usize;
                     self.frame_buffer[index .. index+4].copy_from_slice(&pixel);
-                    /*self.frame_buffer[index + 1] = self.ppu_y as u8;
-                    self.frame_buffer[index + 2] = 128;
-                    self.frame_buffer[index + 3] = 255;*/
                 }
 
                 // VBlank flag
