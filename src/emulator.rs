@@ -7,7 +7,7 @@ use crate::opcodes::AddressMode;
 
 //--------------------------------------------------------------------------------
 
-const c_palette: [[u8; 4]; 64] = [
+const PALETTE: [[u8; 4]; 64] = [
     [ 84,  84,  84, 255],  
     [  0,  30, 116, 255],  
     [  8,  16, 144, 255],  
@@ -131,6 +131,12 @@ struct SpriteData {
     x: u8
 }
 
+#[derive(Default)]
+pub struct JoypadState {
+    pub buttons: [bool; 8],
+    pub next_button: usize
+}
+
 pub struct EmuState {
     pub rom_state : RomState,
     ram : [u8; 2048],
@@ -142,6 +148,8 @@ pub struct EmuState {
     pub reg_a: u8,
     pub reg_x: u8,
     pub reg_y: u8,
+
+    pub joypad1: JoypadState,
 
     ppu_ctrl: u8,
     ppu_mask: u8,
@@ -176,6 +184,7 @@ impl EmuState {
             reg_a: 0,
             reg_x: 0,
             reg_y: 0,
+            joypad1: Default::default(),
             ppu_ctrl: 0,
             ppu_mask: 0,
             ppu_status: 0,
@@ -240,7 +249,13 @@ impl EmuState {
             }
 
             // Joypad registers
-            0x4016 | 0x4017 => {
+            0x4016 => {
+                let result = if self.joypad1.buttons[self.joypad1.next_button] { 1u8 } else { 0u8 };
+                self.joypad1.next_button = (self.joypad1.next_button + 1) % 8;
+                return Ok(result);
+            }
+            
+            0x4017 => {
                 // TODO
                 Ok(0)
             }
@@ -357,7 +372,12 @@ impl EmuState {
             }
 
             // Joypad registers
-            0x4016 | 0x4017 => {
+            0x4016 => {
+                self.joypad1.next_button = 0;
+                Ok(())
+            }
+            
+            0x4017 => {
                 // TODO
                 Ok(())
             }
@@ -1071,7 +1091,7 @@ impl EmuState {
 
                     // Get palette colour
                     let colour_index = self.ppu_palette_ram[palette_index as usize];
-                    let pixel = c_palette[colour_index as usize];
+                    let pixel = PALETTE[colour_index as usize];
 
                     // Set the pixel in the frame buffer
                     let index = ((self.ppu_y * 256 + self.ppu_x - 1) * 4) as usize;

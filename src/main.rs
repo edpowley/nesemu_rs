@@ -4,8 +4,9 @@ use std::io::{self, BufRead};
 
 use ggez::{Context, ContextBuilder, GameResult};
 use ggez::graphics::{self, Color, Image, DrawParam, FilterMode};
-use ggez::event::{self, EventHandler};
+use ggez::event::{self, EventHandler, KeyCode};
 use ggez::conf::{WindowMode, WindowSetup};
+use ggez::input::keyboard;
 use ggez::timer;
 
 use ggez::mint::Point2;
@@ -120,8 +121,23 @@ impl MyGame {
 
 }
 
+const KEY_MAP: [(KeyCode, usize); 8] = [
+    (KeyCode::A, 0),
+    (KeyCode::S, 1),
+    (KeyCode::Back, 2),
+    (KeyCode::Return, 3),
+    (KeyCode::Up, 4),
+    (KeyCode::Down, 5),
+    (KeyCode::Left, 6),
+    (KeyCode::Right, 7)
+];
+
 impl EventHandler<ggez::GameError> for MyGame {
     fn update(&mut self, _ctx: &mut Context) -> GameResult<()> {
+        for (keycode, index) in KEY_MAP {
+            self.emu_state.joypad1.buttons[index] = keyboard::is_key_pressed(_ctx, keycode);
+        }
+
         self.emu_state.run_to_next_nmi();
         //println!("{} {}", self.emu_state.ppu_x, self.emu_state.ppu_y);
 
@@ -132,7 +148,7 @@ impl EventHandler<ggez::GameError> for MyGame {
         if self.frame_count % 60 == 0 {
             println!("{} fps", timer::fps(_ctx));
         }
-        
+
         Ok(())
     }
 
