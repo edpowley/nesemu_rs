@@ -1,9 +1,25 @@
+use std::io;
 use std::fs;
 use std::path::Path;
 
 use crate::opcodes;
 use crate::opcodes::Mnemonic;
 use crate::opcodes::AddressMode;
+
+#[derive(Debug)]
+pub enum Error {
+    IOError(io::Error),
+    RomFileError(String),
+    AddressError(String)
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        Error::IOError(err)
+    }
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 //--------------------------------------------------------------------------------
 
@@ -85,29 +101,38 @@ pub struct RomState {
 }
 
 impl RomState {
-    pub fn load(path: &Path) -> RomState {
-        let content = fs::read(path).expect("Failed to read file");
+    pub fn load(path: &Path) -> Result<RomState> {
+        // Read entire file into a vector
+        let content = fs::read(path)?;
 
-        // TODO: parse more of the header
+        // Check header
+        if content[0] != 0x4E || content[1] != 0x45 || content[2] != 0x53 || content[3] != 0x1A {
+            return Err(Error::RomFileError("header bytes are incorrect".to_string()));
+        }
+
+        // Check NES 2.0 format
+        if content[7] & 0x0C == 0x08 {
+            return Err(Error::RomFileError("NES 2.0 format is not yet supported".to_string()));
+        }
+
+        // Get ROM data sizes
         let prg_size = (content[4] as usize) * 16384;
         let chr_size = (content[5] as usize) * 8192;
 
-        let nametable_mirror_mode;
-        if content[6] & 1 != 0 {
-            nametable_mirror_mode = NametableMirrorMode::Horizontal;
+        // Get mapper number
+        let mapper = (content[6] >> 4) | (content[7] & 0xF0);
+        if mapper != 0 {
+            return Err(Error::RomFileError(format!("mapper {} is not supported", mapper)));
         }
-        else { //if content[6] & 2 != 0 {
-            nametable_mirror_mode = NametableMirrorMode::Vertical;
-        }
-        /*else {
-            panic!("Unknown mirror mode flags");
-        }*/
 
-        return RomState {
+        // Get nametable mirror mode
+        let nametable_mirror_mode = if content[6] & 1 != 0 { NametableMirrorMode::Horizontal } else { NametableMirrorMode::Vertical };
+
+        return Ok(RomState {
             prg_rom: content[16 .. 16+prg_size].to_vec(),
             chr_rom: content[16+prg_size .. 16+prg_size+chr_size].to_vec(),
             nametable_mirror_mode
-        };
+        });
     }
 }
 
@@ -172,9 +197,9 @@ pub struct EmuState {
 }
 
 impl EmuState {
-    pub fn new(rom_path: &Path) -> EmuState {
+    pub fn new(rom_path: &Path) -> Result<EmuState> {
         let mut result = EmuState {
-            rom_state: RomState::load(rom_path),
+            rom_state: RomState::load(rom_path)?,
             ram: [0; 2048],
             cycle_count: 0,
             last_ppu_cycle: 0,
@@ -205,10 +230,10 @@ impl EmuState {
         };
         result.cpu_flags.interrupt_disable = true;
         result.frame_buffer.resize(256 * 240 * 4, 0);
-        return result;
+        return Ok(result);
     }
 
-    fn read_byte(&mut self, address: u16) -> Result<u8, &'static str> {
+    fn read_byte(&mut self, address: u16) -> Result<u8> {
         match address {
             // internal RAM
             0x0000 ..= 0x07FF => Ok(self.ram[address as usize]),
@@ -272,7 +297,7 @@ impl EmuState {
             },
 
             // catch-all
-            _ => Err("Invalid memory address")
+            _ => Err(Error::AddressError("Invalid memory address".to_string()))
         }
     }
 
@@ -282,7 +307,7 @@ impl EmuState {
         return result.expect("Failed to read next program byte");
     }
 
-    fn write_byte(&mut self, address: u16, value: u8) -> Result<(), &'static str> {
+    fn write_byte(&mut self, address: u16, value: u8) -> Result<()> {
         match address {
             // internal RAM
             0x0000 ..= 0x07FF => {
@@ -311,7 +336,7 @@ impl EmuState {
             0x2003 => {
                 self.update_ppu();
                 if value != 0 {
-                    Err("Nonzero OAM address not implemented")
+                    Err(Error::AddressError("Nonzero OAM address not implemented".to_string()))
                 } else {
                     Ok(())
                 }
@@ -388,7 +413,7 @@ impl EmuState {
             0x2008 ..= 0x3FFF => self.write_byte(address & 0x2007, value),
 
             // catch-all
-            _ => Err("Invalid memory address")
+            _ => Err(Error::AddressError("Invalid memory address".to_string()))
         }
     }
 
@@ -561,7 +586,7 @@ impl EmuState {
         }
 
         match opcode.mnemonic {
-            Mnemonic::XXX => {} //panic!("Invalid opcode"),
+            Mnemonic::XXX => panic!("Invalid opcode"),
 
             Mnemonic::ADC => {
                 let other = self.read_byte(operand_address).expect("Bad memory access");
