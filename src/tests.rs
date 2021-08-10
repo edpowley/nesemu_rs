@@ -62,7 +62,7 @@ fn run_test_rom() {
         assert_eq!(emu_state.get_flags_as_u8(), log_line.p, "Flags: actual {:08b}, expected {:08b}", emu_state.get_flags_as_u8(), log_line.p);
         assert_eq!(emu_state.stack_pointer, log_line.sp, "Stack");
 
-        emu_state.run_one_instruction();
+        emu_state.run_one_instruction().unwrap();
     }
 }
 

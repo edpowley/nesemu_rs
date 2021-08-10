@@ -10,12 +10,19 @@ use crate::opcodes::AddressMode;
 pub enum Error {
     IOError(io::Error),
     RomFileError(String),
-    AddressError(String)
+    AddressError(String),
+    InvalidInstructionError(u8)
 }
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Error::IOError(err)
+    }
+}
+
+impl From<Error> for ggez::error::GameError {
+    fn from(err: Error) -> Self {
+        Self::CustomError(format!("{:?}", err))
     }
 }
 
@@ -127,6 +134,19 @@ impl RomState {
 
         // Get nametable mirror mode
         let nametable_mirror_mode = if content[6] & 1 != 0 { NametableMirrorMode::Horizontal } else { NametableMirrorMode::Vertical };
+
+        // Check for things we don't support
+        if content[6] & 2 != 0 {
+            return Err(Error::RomFileError("Battery-backed RAM is not supported".to_string()));
+        }
+
+        if content[6] & 4 != 0 {
+            return Err(Error::RomFileError("Trainer is not supported".to_string()));
+        }
+
+        if content[6] & 8 != 0 {
+            return Err(Error::RomFileError("Four-screen VRAM is not supported".to_string()));
+        }
 
         return Ok(RomState {
             prg_rom: content[16 .. 16+prg_size].to_vec(),
@@ -243,7 +263,7 @@ impl EmuState {
             
             // PPU_STATUS
             0x2002 => { 
-                self.update_ppu();
+                self.update_ppu()?;
                 let result = self.ppu_status;
                 self.ppu_status &= 0x7F; // clear VBLANK latch
                 self.ppu_address = 0; // clear address latch
@@ -253,16 +273,16 @@ impl EmuState {
 
             // PPU_DATA
             0x2007 => {
-                self.update_ppu();
+                self.update_ppu()?;
 
                 // https://wiki.nesdev.com/w/index.php?title=PPU_registers#The_PPUDATA_read_buffer_.28post-fetch.29
                 // Palette data is not buffered, all other data is
                 if self.ppu_address >= 0x3F00 && self.ppu_address <= 0x3FFF {
-                    self.ppu_data_read_buffer = self.read_ppu_byte(self.ppu_address);
+                    self.ppu_data_read_buffer = self.read_ppu_byte(self.ppu_address)?;
                 }
 
                 let result = self.ppu_data_read_buffer;
-                self.ppu_data_read_buffer = self.read_ppu_byte(self.ppu_address);
+                self.ppu_data_read_buffer = self.read_ppu_byte(self.ppu_address)?;
 
                 if self.ppu_ctrl & 4 != 0 {
                     self.ppu_address += 32;
@@ -301,10 +321,10 @@ impl EmuState {
         }
     }
 
-    fn read_next_program_byte(&mut self) -> u8 {
-        let result = self.read_byte(self.program_counter);
+    fn read_next_program_byte(&mut self) -> Result<u8> {
+        let result = self.read_byte(self.program_counter)?;
         self.program_counter += 1;
-        return result.expect("Failed to read next program byte");
+        return Ok(result);
     }
 
     fn write_byte(&mut self, address: u16, value: u8) -> Result<()> {
@@ -320,21 +340,21 @@ impl EmuState {
             
             // PPU_CTRL
             0x2000 => {
-                self.update_ppu();
+                self.update_ppu()?;
                 self.ppu_ctrl = value;
                 Ok(())
             }
 
             // PPU_MASK
             0x2001 => {
-                self.update_ppu();
+                self.update_ppu()?;
                 self.ppu_mask = value;
                 Ok(())
             }
 
             // PPU_OAM_ADDR
             0x2003 => {
-                self.update_ppu();
+                self.update_ppu()?;
                 if value != 0 {
                     Err(Error::AddressError("Nonzero OAM address not implemented".to_string()))
                 } else {
@@ -344,7 +364,7 @@ impl EmuState {
 
             // PPU_SCROLL
             0x2005 => {
-                self.update_ppu();
+                self.update_ppu()?;
                 if !self.ppu_scroll_latch {
                     self.ppu_scroll_x = value;
                 } else {
@@ -356,15 +376,15 @@ impl EmuState {
 
             // PPU_ADDR
             0x2006 => {
-                self.update_ppu();
+                self.update_ppu()?;
                 self.ppu_address = self.ppu_address << 8 | (value as u16);
                 Ok(())
             }
 
             // PPU_DATA
             0x2007 => {
-                self.update_ppu();
-                self.write_ppu_byte(self.ppu_address, value);
+                self.update_ppu()?;
+                self.write_ppu_byte(self.ppu_address, value)?;
                 if self.ppu_ctrl & 4 != 0 {
                     self.ppu_address += 32;
                 }
@@ -378,14 +398,14 @@ impl EmuState {
             0x4014 => {
                 let base_address = (value as u16) << 8;
                 for index in 0..256 {
-                    self.ppu_oam_ram[index] = self.read_byte(base_address + index as u16).expect("Bad memory access");
+                    self.ppu_oam_ram[index] = self.read_byte(base_address + index as u16)?;
                 }
 
                 if self.cycle_count % 2 == 1 {
                     self.cycle_count += 1;
                 }
                 self.cycle_count += 513;
-                self.update_ppu();
+                self.update_ppu()?;
 
                 Ok(())
             }
@@ -432,12 +452,12 @@ impl EmuState {
         return self.ram[0x100 | self.stack_pointer as usize];
     }
 
-    fn get_operand_address(&mut self, address_mode: &AddressMode) -> u16 {
+    fn get_operand_address(&mut self, address_mode: &AddressMode) -> Result<u16> {
         match address_mode {
             AddressMode::ABS | AddressMode::ABX | AddressMode::ABY => {
                 self.cycle_count += 2;
-                let lo_byte = self.read_next_program_byte();
-                let hi_byte = self.read_next_program_byte();
+                let lo_byte = self.read_next_program_byte()?;
+                let hi_byte = self.read_next_program_byte()?;
                 let base_address = ((hi_byte as u16) << 8) | (lo_byte as u16);
                 let offset = match address_mode {
                     AddressMode::ABS => 0,
@@ -449,21 +469,21 @@ impl EmuState {
                 if (base_address >> 8) != (address >> 8) {
                     self.cycle_count += 1; // page boundary crossed
                 }
-                return address;
+                return Ok(address);
             }
 
             AddressMode::IDX => {
                 self.cycle_count += 4;
-                let zp_address = self.read_next_program_byte().wrapping_add(self.reg_x) as u16;
-                let lo_byte = self.read_byte( zp_address         ).expect("Invalid memory read");
-                let hi_byte = self.read_byte((zp_address+1) % 256).expect("Invalid memory read");
-                return ((hi_byte as u16) << 8) | (lo_byte as u16);
+                let zp_address = self.read_next_program_byte()?.wrapping_add(self.reg_x) as u16;
+                let lo_byte = self.read_byte( zp_address         )?;
+                let hi_byte = self.read_byte((zp_address+1) % 256)?;
+                return Ok(((hi_byte as u16) << 8) | (lo_byte as u16));
             },
 
             AddressMode::IDY => {
-                let zp_address = self.read_next_program_byte() as u16;
-                let lo_byte = self.read_byte( zp_address         ).expect("Invalid memory read");
-                let hi_byte = self.read_byte((zp_address+1) % 256).expect("Invalid memory read");
+                let zp_address = self.read_next_program_byte()? as u16;
+                let lo_byte = self.read_byte( zp_address         )?;
+                let hi_byte = self.read_byte((zp_address+1) % 256)?;
                 let base_address = ((hi_byte as u16) << 8) | (lo_byte as u16);
                 let address = base_address.wrapping_add(self.reg_y as u16);
 
@@ -471,47 +491,47 @@ impl EmuState {
                 if (base_address >> 8) != (address >> 8) {
                     self.cycle_count += 1; // page boundary crossed
                 }
-                return address;
+                return Ok(address);
             },
 
             AddressMode::IMM => {
                 self.program_counter += 1;
-                return self.program_counter - 1;
+                return Ok(self.program_counter - 1);
             },
 
-            AddressMode::IMP => 0, // not used
+            AddressMode::IMP => Ok(0), // not used
 
             AddressMode::IND => {
                 self.cycle_count += 2;
                 let lo_byte = self.read_next_program_byte();
                 let hi_byte = self.read_next_program_byte();
-                let base_address = ((hi_byte as u16) << 8) | (lo_byte as u16);
-                let lo_byte_2 = self.read_byte(base_address).expect("Invalid memory read");
+                let base_address = ((hi_byte? as u16) << 8) | (lo_byte? as u16);
+                let lo_byte_2 = self.read_byte(base_address)?;
                 let hi_index = ((base_address+1) & 0xFF) | (base_address & 0xFF00); // page wrapping
-                let hi_byte_2 = self.read_byte(hi_index).expect("Invalid memory read");
-                return ((hi_byte_2 as u16) << 8) | (lo_byte_2 as u16);
+                let hi_byte_2 = self.read_byte(hi_index)?;
+                return Ok(((hi_byte_2 as u16) << 8) | (lo_byte_2 as u16));
             },
 
             AddressMode::REL => {
-                let offset = self.read_next_program_byte() as i8;
+                let offset = self.read_next_program_byte()? as i8;
                 let new_pc = (self.program_counter as i32) + (offset as i32);
-                return new_pc as u16;
+                return Ok(new_pc as u16);
             },
 
             AddressMode::ZPG => {
                 self.cycle_count += 1;
-                return self.read_next_program_byte() as u16;
+                return Ok(self.read_next_program_byte()? as u16);
             },
 
             AddressMode::ZPX | AddressMode::ZPY => {
                 self.cycle_count += 2;
-                let base_address = self.read_next_program_byte();
+                let base_address = self.read_next_program_byte()?;
                 let offset = match address_mode {
                     AddressMode::ZPX => self.reg_x,
                     AddressMode::ZPY => self.reg_y,
                     _ => unreachable!()
                 };
-                return base_address.wrapping_add(offset) as u16;
+                return Ok(base_address.wrapping_add(offset) as u16);
             },
         }
     }
@@ -548,25 +568,25 @@ impl EmuState {
         self.program_counter = address;
     }
 
-    pub fn run_to_next_nmi(&mut self) {
+    pub fn run_to_next_nmi(&mut self) -> Result<()> {
         if self.ppu_nmi_flag {
             self.ppu_nmi_flag = false;
-            let interrupt_lo = self.read_byte(0xFFFA).expect("Failed to read NMI address");
-            let interrupt_hi = self.read_byte(0xFFFB).expect("Failed to read NMI address");
+            let interrupt_lo = self.read_byte(0xFFFA)?;
+            let interrupt_hi = self.read_byte(0xFFFB)?;
             let interrupt_address = (interrupt_lo as u16) | ((interrupt_hi as u16) << 8);
             self.jump_to_interrupt(interrupt_address);
         }
 
         loop {
-            self.run_one_instruction();
-            if self.ppu_nmi_flag { return }
+            self.run_one_instruction()?;
+            if self.ppu_nmi_flag { return Ok(()); }
         }
     }
 
-    pub fn run_one_instruction(&mut self) {
+    pub fn run_one_instruction(&mut self) -> Result<()> {
         let debug_print = false;
 
-        let instruction = self.read_next_program_byte();
+        let instruction = self.read_next_program_byte()?;
         let opcode = opcodes::decode(instruction);
 
         if debug_print {
@@ -575,21 +595,21 @@ impl EmuState {
 
         self.cycle_count += 2;
 
-        let operand_address = self.get_operand_address(&opcode.address_mode);
+        let operand_address = self.get_operand_address(&opcode.address_mode)?;
 
         if debug_print {
             print!("  {:04X}", operand_address);
             match operand_address {
-                0x0000 ..= 0x1FFF | 0x8000 ..= 0xFFFF => println!(" ({:02X})", self.read_byte(operand_address).expect("wtf")),
+                0x0000 ..= 0x1FFF | 0x8000 ..= 0xFFFF => println!(" ({:02X})", self.read_byte(operand_address)?),
                 _ => println!("")
             }
         }
 
         match opcode.mnemonic {
-            Mnemonic::XXX => panic!("Invalid opcode"),
+            Mnemonic::XXX => { return Err(Error::InvalidInstructionError(instruction)) }
 
             Mnemonic::ADC => {
-                let other = self.read_byte(operand_address).expect("Bad memory access");
+                let other = self.read_byte(operand_address)?;
                 let (result_1, overflow_1) = self.reg_a.overflowing_add(other);
                 let (result, overflow) = result_1.overflowing_add(if self.cpu_flags.carry {1} else {0});
                 self.set_zero_negative_flags(result);
@@ -601,7 +621,7 @@ impl EmuState {
             }
 
             Mnemonic::SBC => {
-                let other = self.read_byte(operand_address).expect("Bad memory access");
+                let other = self.read_byte(operand_address)?;
                 let (result_1, overflow_1) = self.reg_a.overflowing_sub(other);
                 let (result, overflow) = result_1.overflowing_sub(if self.cpu_flags.carry {0} else {1});
                 self.set_zero_negative_flags(result);
@@ -611,7 +631,7 @@ impl EmuState {
             }
             
             Mnemonic::AND => {
-                let other = self.read_byte(operand_address).expect("Invalid operand");
+                let other = self.read_byte(operand_address)?;
                 self.reg_a &= other;
                 self.set_zero_negative_flags(self.reg_a);
             }
@@ -640,15 +660,15 @@ impl EmuState {
             }
 
             Mnemonic::BIT => {
-                let other = self.read_byte(operand_address).expect("Invalid operand");
+                let other = self.read_byte(operand_address)?;
                 self.cpu_flags.zero = self.reg_a & other == 0;
                 self.cpu_flags.overflow = other & 0x40 != 0;
                 self.cpu_flags.negative = other & 0x80 != 0;
             }
 
             Mnemonic::BRK => {
-                let interrupt_lo = self.read_byte(0xFFFE).expect("Failed to read NMI address");
-                let interrupt_hi = self.read_byte(0xFFFF).expect("Failed to read NMI address");
+                let interrupt_lo = self.read_byte(0xFFFE)?;
+                let interrupt_hi = self.read_byte(0xFFFF)?;
                 let interrupt_address = (interrupt_lo as u16) | ((interrupt_hi as u16) << 8);
                 self.jump_to_interrupt(interrupt_address);
             }
@@ -677,7 +697,7 @@ impl EmuState {
                     _ => unreachable!()
                 };
 
-                let value = self.read_byte(operand_address).expect("Bad memory access");
+                let value = self.read_byte(operand_address)?;
 
                 self.cpu_flags.carry = reg >= value;
                 self.cpu_flags.zero = reg == value;
@@ -685,8 +705,8 @@ impl EmuState {
             }
 
             Mnemonic::DEC => {
-                let value = self.read_byte(operand_address).expect("Bad memory access").wrapping_sub(1);
-                self.write_byte(operand_address, value).expect("Bad memory access");
+                let value = self.read_byte(operand_address)?.wrapping_sub(1);
+                self.write_byte(operand_address, value)?;
                 self.set_zero_negative_flags(value);
             }
 
@@ -701,14 +721,14 @@ impl EmuState {
             }
 
             Mnemonic::EOR => {
-                let other = self.read_byte(operand_address).expect("Invalid operand");
+                let other = self.read_byte(operand_address)?;
                 self.reg_a ^= other;
                 self.set_zero_negative_flags(self.reg_a);
             }
 
             Mnemonic::INC => {
-                let value = self.read_byte(operand_address).expect("Bad memory access").wrapping_add(1);
-                self.write_byte(operand_address, value).expect("Bad memory access");
+                let value = self.read_byte(operand_address)?.wrapping_add(1);
+                self.write_byte(operand_address, value)?;
                 self.set_zero_negative_flags(value);
             }
 
@@ -725,7 +745,7 @@ impl EmuState {
             Mnemonic::JMP => {
                 self.cycle_count += 1;
                 self.program_counter = operand_address;
-                self.update_ppu();
+                self.update_ppu()?;
             }
 
             Mnemonic::JSR => {
@@ -740,17 +760,17 @@ impl EmuState {
             }
 
             Mnemonic::LDA => {
-                self.reg_a = self.read_byte(operand_address).expect("Bad memory access");
+                self.reg_a = self.read_byte(operand_address)?;
                 self.set_zero_negative_flags(self.reg_a);
             }
 
             Mnemonic::LDX => {
-                self.reg_x = self.read_byte(operand_address).expect("Bad memory access");
+                self.reg_x = self.read_byte(operand_address)?;
                 self.set_zero_negative_flags(self.reg_x);
             }
 
             Mnemonic::LDY => {
-                self.reg_y = self.read_byte(operand_address).expect("Bad memory access");
+                self.reg_y = self.read_byte(operand_address)?;
                 self.set_zero_negative_flags(self.reg_y);
             }
 
@@ -759,7 +779,7 @@ impl EmuState {
             }
 
             Mnemonic::ORA => {
-                let other = self.read_byte(operand_address).expect("Invalid operand");
+                let other = self.read_byte(operand_address)?;
                 self.reg_a |= other;
                 self.set_zero_negative_flags(self.reg_a);
             }
@@ -788,7 +808,7 @@ impl EmuState {
             Mnemonic::ASL | Mnemonic::LSR | Mnemonic::ROL | Mnemonic::ROR => {
                 let old_value = match opcode.address_mode {
                     AddressMode::IMP => self.reg_a,
-                    _ => self.read_byte(operand_address).expect("Bad memory access")
+                    _ => self.read_byte(operand_address)?
                 };
                 let carry_bit: u8 = if self.cpu_flags.carry { 1 } else { 0 };
                 let new_value = match opcode.mnemonic {
@@ -808,7 +828,7 @@ impl EmuState {
 
                 match opcode.address_mode {
                     AddressMode::IMP => self.reg_a = new_value,
-                    _ => self.write_byte(operand_address, new_value).expect("Bad memory access")
+                    _ => self.write_byte(operand_address, new_value)?
                 };
             }
 
@@ -848,15 +868,15 @@ impl EmuState {
             }
 
             Mnemonic::STA => {
-                self.write_byte(operand_address, self.reg_a).expect("Bad memory access");
+                self.write_byte(operand_address, self.reg_a)?;
             }
 
             Mnemonic::STX => {
-                self.write_byte(operand_address, self.reg_x).expect("Bad memory access");
+                self.write_byte(operand_address, self.reg_x)?;
             }
 
             Mnemonic::STY => {
-                self.write_byte(operand_address, self.reg_y).expect("Bad memory access");
+                self.write_byte(operand_address, self.reg_y)?;
             }
 
             Mnemonic::TAX => {
@@ -887,15 +907,17 @@ impl EmuState {
                 self.reg_a = self.reg_y;
                 self.set_zero_negative_flags(self.reg_a);
             }
-        }
+        };
+
+        return Ok(());
     }
 
     // ----------------------------------------------------------------------------
 
-    fn read_ppu_byte(&self, address : u16) -> u8 {
+    fn read_ppu_byte(&self, address : u16) -> Result<u8> {
         match address {
             // Pattern tables
-            0x0000 ..= 0x1FFF => self.rom_state.chr_rom[address as usize],
+            0x0000 ..= 0x1FFF => Ok(self.rom_state.chr_rom[address as usize]),
 
             // Nametables
             0x2000 ..= 0x2FFF => {
@@ -905,7 +927,7 @@ impl EmuState {
                     NametableMirrorMode::Horizontal => nametable_index % 2,
                     NametableMirrorMode::Vertical => nametable_index / 2
                 };
-                self.ppu_nametable_ram[mirrored_index][(address & 0x03FF) as usize]
+                Ok(self.ppu_nametable_ram[mirrored_index][(address & 0x03FF) as usize])
             }
 
             // Wrapping
@@ -913,19 +935,22 @@ impl EmuState {
 
             // Palette
             0x3F00 ..= 0x3F1F => match address { 
-                0x3F10 | 0x3F14 | 0x3F18 | 0x3F1C => self.ppu_palette_ram[(address - 0x3F10) as usize],
-                _ => self.ppu_palette_ram[(address - 0x3F00) as usize]
+                // Extra wrapping for background colours
+                0x3F10 | 0x3F14 | 0x3F18 | 0x3F1C => Ok(self.ppu_palette_ram[(address - 0x3F10) as usize]),
+
+                // Non-background colours do not wrap
+                _ => Ok(self.ppu_palette_ram[(address - 0x3F00) as usize])
             }
 
             // Wrapping
             0x3F20 ..= 0x3FFF => self.read_ppu_byte(address & 0x3F1F),
 
             // Default
-            _ => panic!("Invalid address")
+            _ => Err(Error::AddressError(format!("invalid PPU address {:04X}", address)))
         }
     }
 
-    fn write_ppu_byte(&mut self, address : u16, value : u8) {
+    fn write_ppu_byte(&mut self, address : u16, value : u8) -> Result<()> {
         match address {
             // Nametables
             0x2000 ..= 0x2FFF => {
@@ -936,35 +961,39 @@ impl EmuState {
                     NametableMirrorMode::Vertical => nametable_index / 2
                 };
                 self.ppu_nametable_ram[mirrored_index][(address & 0x03FF) as usize] = value;
+                Ok(())
             }
 
             // Wrapping
             0x3000 ..= 0x3EFF => self.write_ppu_byte(address - 0x1000, value),
 
             // Palette
-            0x3F00 ..= 0x3F1F => match address { 
+            0x3F00 ..= 0x3F1F => {
+                match address { 
                     0x3F10 | 0x3F14 | 0x3F18 | 0x3F1C => self.ppu_palette_ram[(address - 0x3F10) as usize] = value,
                     _ => self.ppu_palette_ram[(address - 0x3F00) as usize] = value
-                }
+                };
+                Ok(())
+            }
 
             // Wrapping
             0x3F20 ..= 0x3FFF => self.write_ppu_byte(address & 0x3F1F, value),
 
             // Default
-            _ => panic!("Invalid address")
+            _ => Err(Error::AddressError(format!("invalid PPU address {:04X}", address)))
         }
     }
 
-    fn get_pixel_from_pattern_table(&self, pt_base: u16, tile_index: u8, x: u8, y: u8) -> u8 {
+    fn get_pixel_from_pattern_table(&self, pt_base: u16, tile_index: u8, x: u8, y: u8) -> Result<u8> {
         let plane_0_address = pt_base + ((tile_index as u16) << 4) + y as u16;
-        let plane_0_row = self.read_ppu_byte(plane_0_address);
-        let plane_1_row = self.read_ppu_byte(plane_0_address + 8);
+        let plane_0_row = self.read_ppu_byte(plane_0_address)?;
+        let plane_1_row = self.read_ppu_byte(plane_0_address + 8)?;
         let bit_0 = (plane_0_row >> (7-x)) & 1;
         let bit_1 = (plane_1_row >> (7-x)) & 1;
-        return bit_0 | (bit_1 << 1);
+        return Ok(bit_0 | (bit_1 << 1));
     }
 
-    fn update_ppu(&mut self) {
+    fn update_ppu(&mut self) -> Result<()> {
         let n_cycles = (self.cycle_count - self.last_ppu_cycle) * 3;
         self.last_ppu_cycle = self.cycle_count;
     
@@ -1039,9 +1068,9 @@ impl EmuState {
                         }
 
                         // Get nametable data
-                        let nt_entry = self.read_ppu_byte(nametable_base + (tile_y * 32 + tile_x) as u16);
+                        let nt_entry = self.read_ppu_byte(nametable_base + (tile_y * 32 + tile_x) as u16)?;
                         let attr_index = (tile_y / 4) * 8 + (tile_x / 4);
-                        let attribute_byte = self.read_ppu_byte(nametable_base + 0x3C0 + attr_index as u16);
+                        let attribute_byte = self.read_ppu_byte(nametable_base + 0x3C0 + attr_index as u16)?;
                         let attribute_idx = (tile_y % 4) / 2 * 2 + (tile_x % 4) / 2;
                         assert!(attribute_idx >= 0 && attribute_idx < 4);
                         let attribute = (attribute_byte >> (attribute_idx * 2)) & 3;
@@ -1049,7 +1078,7 @@ impl EmuState {
                         // Get pattern table data
                         let pattern_table_base = ((self.ppu_ctrl & 0x10) as u16) << 8;
                         assert!(pattern_table_base == 0x0000 || pattern_table_base == 0x1000);
-                        let palette_index = self.get_pixel_from_pattern_table(pattern_table_base, nt_entry, (nt_x % 8) as u8, (nt_y % 8) as u8);
+                        let palette_index = self.get_pixel_from_pattern_table(pattern_table_base, nt_entry, (nt_x % 8) as u8, (nt_y % 8) as u8)?;
 
                         if palette_index == 0 {
                             bg_pixel = 0;
@@ -1084,7 +1113,7 @@ impl EmuState {
                                     py = 7 - py;
                                 }
 
-                                let palette_index = self.get_pixel_from_pattern_table(pattern_table_base, sprite.tile, px as u8, py as u8);
+                                let palette_index = self.get_pixel_from_pattern_table(pattern_table_base, sprite.tile, px as u8, py as u8)?;
 
                                 if palette_index == 0 {
                                     sprite_pixel = 0;
@@ -1135,8 +1164,6 @@ impl EmuState {
                 _ => {}
             }
 
-            // TODO more logic
-            
             // Advance
             self.ppu_x += 1;
             if self.ppu_x == 341 {
@@ -1148,5 +1175,7 @@ impl EmuState {
                 }
             }
         }
+
+        Ok(())
     }
 }

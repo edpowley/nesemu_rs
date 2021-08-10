@@ -76,8 +76,7 @@ impl EventHandler<ggez::GameError> for MyGame {
             self.emu_state.joypad1.buttons[index] = keyboard::is_key_pressed(_ctx, keycode);
         }
 
-        self.emu_state.run_to_next_nmi();
-        //println!("{} {}", self.emu_state.ppu_x, self.emu_state.ppu_y);
+        self.emu_state.run_to_next_nmi()?;
 
         self.frame_image = Image::from_rgba8(_ctx, 256, 240, &self.emu_state.frame_buffer)?;
         self.frame_image.set_filter(FilterMode::Nearest);
