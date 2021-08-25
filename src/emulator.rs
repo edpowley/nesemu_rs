@@ -213,7 +213,12 @@ pub struct EmuState {
     ppu_nmi_flag: bool,
 
     pub frame_buffer: Vec<u8>,
-    sprites_this_scanline: Vec<SpriteData>
+    sprites_this_scanline: Vec<SpriteData>,
+    x_in_bg_tile: u8,
+    y_in_bg_tile: u8,
+    nt_entry: u8,
+    attribute: u8,
+
 }
 
 impl EmuState {
@@ -246,7 +251,11 @@ impl EmuState {
             ppu_scroll_latch: false,
             ppu_nmi_flag: false,
             frame_buffer: Vec::new(),
-            sprites_this_scanline: Vec::new()
+            sprites_this_scanline: Vec::new(),
+            x_in_bg_tile: 0,
+            y_in_bg_tile: 0,
+            nt_entry: 0,
+            attribute: 0
         };
         result.cpu_flags.interrupt_disable = true;
         result.frame_buffer.resize(256 * 240 * 4, 0);
@@ -993,6 +1002,40 @@ impl EmuState {
         return Ok(bit_0 | (bit_1 << 1));
     }
 
+    fn update_bg_tile(&mut self) -> Result<()> {
+        let mut nametable_base = (self.ppu_ctrl & 3) as u16 * 0x400 + 0x2000;
+        assert!(nametable_base == 0x2000 || nametable_base == 0x2400 || nametable_base == 0x2800 || nametable_base == 0x2C00);
+
+        // Position in nametable in pixels
+        let nt_x = (self.ppu_scroll_x as i32) + self.ppu_x - 1;
+        let nt_y = (self.ppu_scroll_y as i32) + self.ppu_y;
+
+        // Nametable tile coordinates
+        let mut tile_x = nt_x / 8;
+        if tile_x >= 32 {
+            tile_x -= 32;
+            nametable_base ^= 0x400;
+        }
+        let mut tile_y = nt_y / 8;
+        if tile_y >= 32 {
+            tile_y -= 32;
+            nametable_base ^= 0x800;
+        }
+
+        // Get nametable data
+        self.nt_entry = self.read_ppu_byte(nametable_base + (tile_y * 32 + tile_x) as u16)?;
+        let attr_index = (tile_y / 4) * 8 + (tile_x / 4);
+        let attribute_byte = self.read_ppu_byte(nametable_base + 0x3C0 + attr_index as u16)?;
+        let attribute_idx = (tile_y % 4) / 2 * 2 + (tile_x % 4) / 2;
+        assert!(attribute_idx >= 0 && attribute_idx < 4);
+        self.attribute = (attribute_byte >> (attribute_idx * 2)) & 3;
+
+        self.x_in_bg_tile = (nt_x % 8) as u8;
+        self.y_in_bg_tile = (nt_y % 8) as u8;
+
+        Ok(())
+    }
+
     fn update_ppu(&mut self) -> Result<()> {
         let n_cycles = (self.cycle_count - self.last_ppu_cycle) * 3;
         self.last_ppu_cycle = self.cycle_count;
@@ -1018,8 +1061,9 @@ impl EmuState {
                     self.ppu_ctrl &= !0x03;
                 }
 
-                // Sprite scanning
+                // Beginning of each scanline
                 (0, 0 ..= 239) => {
+                    // Get sprites for this scanline
                     self.sprites_this_scanline.clear();
 
                     'check_sprites: for i in 0..64 {
@@ -1048,51 +1092,23 @@ impl EmuState {
 
                     // Background drawing
                     if self.ppu_mask & 0x08 != 0 {
-                        let mut nametable_base = (self.ppu_ctrl & 3) as u16 * 0x400 + 0x2000;
-                        assert!(nametable_base == 0x2000 || nametable_base == 0x2400 || nametable_base == 0x2800 || nametable_base == 0x2C00);
-
-                        // Position in nametable in pixels
-                        let nt_x = (self.ppu_scroll_x as i32) + self.ppu_x - 1;
-                        let nt_y = (self.ppu_scroll_y as i32) + self.ppu_y;
-
-                        // Nametable tile coordinates
-                        let mut tile_x = nt_x / 8;
-                        if tile_x >= 32 {
-                            tile_x -= 32;
-                            nametable_base ^= 0x400;
+                        // Update nametable data
+                        if self.ppu_x == 1 || self.x_in_bg_tile >= 8 {
+                            self.update_bg_tile()?;
                         }
-                        let mut tile_y = nt_y / 8;
-                        if tile_y >= 32 {
-                            tile_y -= 32;
-                            nametable_base ^= 0x800;
-                        }
-
-                        // Get nametable data
-                        let nt_entry = self.read_ppu_byte(nametable_base + (tile_y * 32 + tile_x) as u16)?;
-                        let attr_index = (tile_y / 4) * 8 + (tile_x / 4);
-                        let attribute_byte = self.read_ppu_byte(nametable_base + 0x3C0 + attr_index as u16)?;
-                        let attribute_idx = (tile_y % 4) / 2 * 2 + (tile_x % 4) / 2;
-                        assert!(attribute_idx >= 0 && attribute_idx < 4);
-                        let attribute = (attribute_byte >> (attribute_idx * 2)) & 3;
-
+                        
                         // Get pattern table data
                         let pattern_table_base = ((self.ppu_ctrl & 0x10) as u16) << 8;
                         assert!(pattern_table_base == 0x0000 || pattern_table_base == 0x1000);
-                        let palette_index = self.get_pixel_from_pattern_table(pattern_table_base, nt_entry, (nt_x % 8) as u8, (nt_y % 8) as u8)?;
+                        let palette_index = self.get_pixel_from_pattern_table(pattern_table_base, self.nt_entry, self.x_in_bg_tile, self.y_in_bg_tile)?;
 
                         if palette_index == 0 {
                             bg_pixel = 0;
                         } else {
-                            bg_pixel = palette_index + attribute * 4;
+                            bg_pixel = palette_index + self.attribute * 4;
                         }
 
-                        // Get palette colour
-                        /*let colour_index = if palette_index > 0 {
-                            self.read_ppu_byte(0x3F00 + (attribute as u16) * 4 + (palette_index as u16))
-                        } else {
-                            self.read_ppu_byte(0x3F00)
-                        };
-                        pixel = c_palette[colour_index as usize];*/
+                        self.x_in_bg_tile += 1;
                     }
 
                     // Sprite drawing
